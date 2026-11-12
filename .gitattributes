@@ -1,2 +1,18 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Source files use LF; Windows command scripts use CRLF.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.patch text eol=lf
+
+# CAD and printable meshes are binary.
+*.SLDPRT binary
+*.SLDASM binary
+*.sldprt binary
+*.sldasm binary
+*.stl binary
+*.STL binary
+*.pdf binary
+*.PDF binary
+*.png binary
+*.jpg binary
+*.jpeg binary

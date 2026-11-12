@@ -1,0 +1,65 @@
+# Build outputs and installed dependencies
+/STM32/AntDec-O1/build/
+/STM32/AntDec-O1/MDK-ARM/*/
+/XMOS/app_antdec_o1/build/
+/XMOS/app_antdec_o1/bin/
+/XMOS/modules/
+/XMOS/backup/
+/Web/node_modules/
+/Web/dist/
+*.o
+*.obj
+*.elf
+*.hex
+*.bin
+*.xe
+*.map
+*.su
+
+# Unused portions of the Cube SDK; keep HAL, CMSIS headers and USB sources
+/STM32/AntDec-O1/Drivers/CMSIS/Core_A/
+/STM32/AntDec-O1/Drivers/CMSIS/docs/
+/STM32/AntDec-O1/Drivers/CMSIS/DSP/
+/STM32/AntDec-O1/Drivers/CMSIS/Lib/
+/STM32/AntDec-O1/Drivers/CMSIS/NN/
+/STM32/AntDec-O1/Drivers/CMSIS/RTOS/
+/STM32/AntDec-O1/Drivers/CMSIS/RTOS2/
+
+# Mechanical deliverables: native SolidWorks parts/assemblies and printable STL
+/Mechanical/*
+!/Mechanical/SolidWorks/
+!/Mechanical/Print/
+/Mechanical/SolidWorks/*
+!/Mechanical/SolidWorks/*.SLDPRT
+!/Mechanical/SolidWorks/*.SLDASM
+!/Mechanical/SolidWorks/*.sldprt
+!/Mechanical/SolidWorks/*.sldasm
+/Mechanical/Print/*
+!/Mechanical/Print/*.stl
+!/Mechanical/Print/*.STL
+
+# Local PCB project, datasheets and reference material
+/PCB/
+/references/
+
+# User-specific editor, debugger and environment settings
+.vscode/
+.idea/
+.codex/
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+CMakeUserPresets.json
+*.uvoptx
+*.uvguix.*
+/STM32/AntDec-O1/MDK-ARM/JLink*
+~$*
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+__pycache__/
+*.py[cod]

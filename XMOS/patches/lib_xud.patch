@@ -1,0 +1,85 @@
+diff --git a/lib_xud/src/core/XUD_Main.xc b/lib_xud/src/core/XUD_Main.xc
+index f424101..c39f9c5 100755
+--- a/lib_xud/src/core/XUD_Main.xc
++++ b/lib_xud/src/core/XUD_Main.xc
+@@ -42,6 +42,7 @@
+ 
+ void XUD_UserSuspend();
+ void XUD_UserResume();
++void XUD_UserEnumerationReady();
+ void XUD_PhyReset_User();
+ 
+ #define HS_TX_HANDSHAKE_TIMEOUT (167)
+@@ -678,6 +679,9 @@ int XUD_Main(chanend c_ep_out[], int noEpOut,
+ 
+     SetupEndpoints(c_ep_out, noEpOut, c_ep_in, noEpIn, epTypeTableOut, epTypeTableIn);
+ 
++    /* Let the application finish loading its USB identity before attaching. */
++    XUD_UserEnumerationReady();
++
+     /* Run the main XUD loop */
+     XUD_Manager_loop(epChans0, epAddr_Ready, c_sof, epTypeTableOut, epTypeTableIn, noEpOut, noEpIn, pwrConfig);
+ 
+diff --git a/lib_xud/src/core/XUD_User.c b/lib_xud/src/core/XUD_User.c
+index c8f8aa6..43c5e00 100644
+--- a/lib_xud/src/core/XUD_User.c
++++ b/lib_xud/src/core/XUD_User.c
+@@ -4,6 +4,11 @@
+ /* User functions to be overridden by app */
+ #include "xud.h"
+ 
++void __attribute__((weak)) XUD_UserEnumerationReady(void)
++{
++    return;
++}
++
+ void XUD_UserSuspend(void) __attribute__ ((weak));
+ void XUD_UserSuspend()
+ {
+diff --git a/lib_xud/src/user/client/XUD_EpFunctions.c b/lib_xud/src/user/client/XUD_EpFunctions.c
+index a89c635..e709297 100644
+--- a/lib_xud/src/user/client/XUD_EpFunctions.c
++++ b/lib_xud/src/user/client/XUD_EpFunctions.c
+@@ -3,6 +3,34 @@
+ 
+ #include "xud.h"
+ #include "XUD_USB_Defines.h"
++#include <xcore/hwtimer.h>
++#include <xcore/select.h>
++
++unsigned XUD_UserSetupIdleInterval(void) __attribute__((weak));
++unsigned XUD_UserSetupIdleInterval(void) { return 0u; }
++void XUD_UserSetupIdle(void) __attribute__((weak));
++void XUD_UserSetupIdle(void) { }
++void XUD_UserSetupIdleUnavailable(void) __attribute__((weak));
++void XUD_UserSetupIdleUnavailable(void) { }
++
++static void wait_setup_idle(unsigned client_chanend)
++{
++    unsigned interval = XUD_UserSetupIdleInterval();
++    if (!interval) return;
++    hwtimer_t timer = hwtimer_alloc();
++    if (!timer) { XUD_UserSetupIdleUnavailable(); return; }
++    hwtimer_set_trigger_time(timer, hwtimer_get_time(timer) + interval);
++    SELECT_RES_ORDERED(CASE_THEN(client_chanend, setup_ready), CASE_THEN(timer, idle_tick)) {
++    setup_ready:
++        break;
++    idle_tick:
++        hwtimer_clear_trigger_time(timer);
++        XUD_UserSetupIdle();
++        hwtimer_set_trigger_time(timer, hwtimer_get_time(timer) + interval);
++        continue;
++    }
++    hwtimer_clear_trigger_time(timer); hwtimer_free(timer);
++}
+ 
+ extern XUD_ep_info ep_info[USB_MAX_NUM_EP];
+ 
+@@ -366,6 +394,7 @@ XUD_Result_t XUD_GetSetupBuffer(XUD_ep e, unsigned char buffer[], unsigned *data
+     *array_ptr_setup = (unsigned) ep;
+ 
+     /* Wait for XUD response */
++    wait_setup_idle(ep->client_chanend);
+     asm volatile("testct %0, res[%1]" : "=r"(busUpdate) : "r"(ep->client_chanend));
+ 
+     if(busUpdate)

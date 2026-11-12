@@ -1,0 +1,13 @@
+[
+  { "name": "lib_xua", "version": "5.2.0", "url": "https://github.com/xmos/lib_xua.git" },
+  { "name": "lib_dsp", "version": "6.3.0", "url": "https://github.com/xmos/lib_dsp.git" },
+  { "name": "lib_adat", "version": "2.0.1", "url": "https://github.com/xmos/lib_adat.git" },
+  { "name": "lib_locks", "version": "2.3.2", "url": "https://github.com/xmos/lib_locks.git" },
+  { "name": "lib_logging", "version": "3.4.0", "url": "https://github.com/xmos/lib_logging.git" },
+  { "name": "lib_spdif", "version": "7.0.0", "url": "https://github.com/xmos/lib_spdif.git" },
+  { "name": "lib_sw_pll", "version": "2.4.0", "url": "https://github.com/xmos/lib_sw_pll.git" },
+  { "name": "lib_xassert", "version": "4.3.1", "url": "https://github.com/xmos/lib_xassert.git" },
+  { "name": "lib_mic_array", "version": "5.5.0", "url": "https://github.com/xmos/lib_mic_array.git" },
+  { "name": "lib_xcore_math", "version": "2.4.0", "url": "https://github.com/xmos/lib_xcore_math.git" },
+  { "name": "lib_xud", "version": "4.0.0", "url": "https://github.com/xmos/lib_xud.git" }
+]

@@ -1,0 +1,543 @@
+diff --git a/lib_xua/src/core/audiohub/xua_audiohub.xc b/lib_xua/src/core/audiohub/xua_audiohub.xc
+index 6478103..657d9b2 100755
+--- a/lib_xua/src/core/audiohub/xua_audiohub.xc
++++ b/lib_xua/src/core/audiohub/xua_audiohub.xc
+@@ -201,6 +201,12 @@ unsigned static AudioHub_MainLoop(chanend ?c_aud, chanend ?c_spd_out
+     /* Since DAC and ADC buffered ports off by one sample we buffer previous ADC frame */
+     unsigned readBuffNo = 0;
+     unsigned index;
++    const unsigned activeDsdMode = dsdMode;
++    unsigned draining = 0;
++    unsigned draining_cmd = XUA_AUDCTL_NO_COMMAND;
++    unsigned drain_frames_left = 0;
++    int drain_pcm_l = 0;
++    int drain_pcm_r = 0;
+ 
+ #if (DSD_CHANS_DAC != 0)
+     unsigned dsdMarker = DSD_MARKER_2;    /* This alternates between DSD_MARKER_1 and DSD_MARKER_2 */
+@@ -216,11 +222,11 @@ unsigned static AudioHub_MainLoop(chanend ?c_aud, chanend ?c_spd_out
+ #endif
+ 
+ #if(DSD_CHANS_DAC != 0)
+-    if(dsdMode == DSD_MODE_DOP)
++    if(activeDsdMode == DSD_MODE_DOP)
+     {
+         underflowWord = 0xFA969600;
+     }
+-    else if(dsdMode == DSD_MODE_NATIVE)
++    else if(activeDsdMode == DSD_MODE_NATIVE)
+     {
+         underflowWord = 0x96969696;
+     }
+@@ -251,7 +257,7 @@ unsigned static AudioHub_MainLoop(chanend ?c_aud, chanend ?c_spd_out
+     UserBufferManagementInit(curSamFreq);
+ 
+     /* Get initial samples for first I2S output */
+-    unsigned command = DoSampleTransfer(c_aud, readBuffNo, underflowWord);
++    unsigned command = DoSampleTransferKeepClocks(c_aud, readBuffNo, underflowWord);
+ 
+     // Reinitialise user state before entering the main loop
+     UserBufferManagementInit(curSamFreq);
+@@ -276,6 +282,7 @@ unsigned static AudioHub_MainLoop(chanend ?c_aud, chanend ?c_spd_out
+ #endif
+     if(command != XUA_AUDCTL_NO_COMMAND)
+     {
++        StopAudioClockOutputs();
+         return command;
+     }
+ 
+@@ -299,9 +306,9 @@ unsigned static AudioHub_MainLoop(chanend ?c_aud, chanend ?c_spd_out
+         while(!syncError)
+         {
+ #if (DSD_CHANS_DAC != 0) && (NUM_USB_CHAN_OUT > 0)
+-            if(dsdMode == DSD_MODE_NATIVE)
++            if(activeDsdMode == DSD_MODE_NATIVE)
+                 DoDsdNative(samplesOut, dsdSample_l, dsdSample_r, divide);
+-            else if(dsdMode == DSD_MODE_DOP)
++            else if(activeDsdMode == DSD_MODE_DOP)
+                 DoDsdDop(everyOther, samplesOut, dsdSample_l, dsdSample_r, divide);
+             else
+ #endif
+@@ -525,15 +532,14 @@ unsigned static AudioHub_MainLoop(chanend ?c_aud, chanend ?c_spd_out
+ 
+ 
+ #if (DSD_CHANS_DAC != 0) && (NUM_USB_CHAN_OUT > 0)
+-            if(DoDsdDopCheck(dsdMode, dsdCount, curSamFreq, samplesOut, dsdMarker) == 0)
++            if(!draining && (DoDsdDopCheck(dsdMode, dsdCount, curSamFreq, samplesOut, dsdMarker) == 0))
+             {
+-#if (I2S_CHANS_ADC != 0) || (I2S_CHANS_DAC != 0)
+-                // Set clocks low
+-                p_lrclk <: 0;
+-                p_bclk <: 0;
+-#endif
+-                p_dsd_clk <: 0;
+-                return 0;
++                AudioHwConfig_FastMuteNotify();
++                draining = 1;
++                draining_cmd = XUA_AUDCTL_NO_COMMAND;
++                drain_frames_left = (curSamFreq / 100u) + 4u;
++                drain_pcm_l = (int)samplesOut[0];
++                drain_pcm_r = (int)samplesOut[1];
+             }
+ #endif
+ 
+@@ -545,17 +551,78 @@ unsigned static AudioHub_MainLoop(chanend ?c_aud, chanend ?c_spd_out
+             {
+                 if ((AUD_TO_USB_RATIO - 1) == audioToUsbRatioCounter)
+                 {
+-                    /* Do samples transfer */
+-                    /* The below looks a bit odd but forces the compiler to inline twice */
+-                    unsigned command;
+-                    if(readBuffNo)
+-                        command = DoSampleTransfer(c_aud, 1, underflowWord);
+-                    else
+-                        command = DoSampleTransfer(c_aud, 0, underflowWord);
++                    if (!draining || (draining_cmd == XUA_AUDCTL_NO_COMMAND))
++                    {
++                        unsigned cmd_rx;
++                        if(readBuffNo)
++                            cmd_rx = DoSampleTransferKeepClocks(c_aud, 1, underflowWord);
++                        else
++                            cmd_rx = DoSampleTransferKeepClocks(c_aud, 0, underflowWord);
++
++                        if(cmd_rx != XUA_AUDCTL_NO_COMMAND)
++                        {
++                            if (!draining)
++                            {
++                                AudioHwConfig_FastMuteNotify();
++                                draining = 1;
++                                drain_frames_left = (curSamFreq / 100u) + 4u;
++                                drain_pcm_l = (int)samplesOut[0];
++                                drain_pcm_r = (int)samplesOut[1];
++                            }
++                            draining_cmd = cmd_rx;
++                        }
++                    }
+ 
+-                    if(command != XUA_AUDCTL_NO_COMMAND)
++                    if (draining)
+                     {
+-                        return command;
++                        if (activeDsdMode == DSD_MODE_OFF)
++                        {
++                            drain_pcm_l -= (drain_pcm_l >> 4);
++                            drain_pcm_r -= (drain_pcm_r >> 4);
++                            if (drain_pcm_l > -16 && drain_pcm_l < 16) drain_pcm_l = 0;
++                            if (drain_pcm_r > -16 && drain_pcm_r < 16) drain_pcm_r = 0;
++                            samplesOut[0] = (unsigned)drain_pcm_l;
++                            samplesOut[1] = (unsigned)drain_pcm_r;
++                        }
++                        else
++                        {
++                            samplesOut[0] = underflowWord;
++                            samplesOut[1] = underflowWord;
++                        }
++
++                        if (drain_frames_left > 0)
++                        {
++                            drain_frames_left--;
++                        }
++
++                        if (drain_frames_left == 0 && (activeDsdMode != DSD_MODE_DOP || everyOther == 1))
++                        {
++                            if (draining_cmd != XUA_AUDCTL_NO_COMMAND)
++                            {
++                                dsdMode = activeDsdMode;
++                                StopAudioClockOutputs();
++                                return draining_cmd;
++                            }
++                            else
++                            {
++#ifndef CODEC_MASTER
++                                if (activeDsdMode == DSD_MODE_OFF)
++                                {
++#if (I2S_CHANS_ADC != 0 || I2S_CHANS_DAC != 0)
++                                    p_lrclk <: 0;
++                                    p_bclk <: 0;
++#endif
++                                }
++                                else
++                                {
++#if (DSD_CHANS_DAC != 0)
++                                    p_dsd_clk <: 0;
++#endif
++                                }
++#endif
++                                return 0;
++                            }
++                        }
+                     }
+ 
+                     /* Reset audio to usb counter because we have now completed one USB transfer and flip the ADC buffer */
+@@ -879,42 +946,6 @@ void XUA_AudioHub(chanend ?c_aud, clock ?clk_audio_mclk, clock ?clk_audio_bclk,
+ 
+            }
+ 
+-#if (I2S_CHANS_DAC != 0) || (I2S_CHANS_ADC != 0)
+-#if (DSD_CHANS_DAC > 0)
+-            if(dsdMode)
+-            {
+-                /* Configure audio ports */
+-                ConfigAudioPortsWrapper(
+-#if (I2S_CHANS_DAC != 0) || (DSD_CHANS_DAC != 0)
+-                    p_dsd_dac,
+-                    DSD_CHANS_DAC,
+-#endif // (I2S_CHANS_DAC != 0) || (DSD_CHANS_DAC != 0)
+-#if (I2S_CHANS_ADC != 0)
+-                    p_i2s_adc,
+-                    I2S_WIRES_ADC,
+-#endif // (I2S_CHANS_ADC != 0)
+-                    null,
+-                    p_dsd_clk,
+-                    p_mclk_in, clk_audio_bclk, divide, curSamFreq);
+-            }
+-            else
+-#endif // (DSD_CHANS_DAC > 0)
+-            {
+-                ConfigAudioPortsWrapper(
+-#if (I2S_CHANS_DAC != 0)
+-                    p_i2s_dac,
+-                    I2S_WIRES_DAC,
+-#endif // (I2S_CHANS_DAC != 0)
+-#if (I2S_CHANS_ADC != 0)
+-                    p_i2s_adc,
+-                    I2S_WIRES_ADC,
+-#endif // (I2S_CHANS_ADC != 0)
+-                    p_lrclk,
+-                    p_bclk,
+-                    p_mclk_in, clk_audio_bclk, divide, curSamFreq);
+-            }
+-#endif // (I2S_CHANS_DAC != 0) || (I2S_CHANS_ADC != 0)
+-
+             {
+                 unsigned curFreq = curSamFreq;
+ #if (DSD_CHANS_DAC > 0)
+@@ -930,11 +961,53 @@ void XUA_AudioHub(chanend ?c_aud, clock ?clk_audio_mclk, clock ?clk_audio_bclk,
+ #endif
+                 /* Configure Clocking/CODEC/DAC/ADC for SampleFreq/MClk */
+ 
+-                /* User should mute audio hardware */
++                /* Mute DAC while old clocks are still running, then stop BCLK before MCLK oscillator switch */
+                 AudioHwConfig_Mute();
++#if (I2S_CHANS_DAC != 0) || (I2S_CHANS_ADC != 0)
++                if (firstRun == 0)
++                {
++                    stop_clock(clk_audio_bclk);
++                }
++#endif
+ 
+                 /* User code should configure audio harware for SampleFreq/MClk etc */
+                 AudioHwConfig(curFreq, mClk, dsdMode, curSamRes_DAC, curSamRes_ADC);
++
++#if (I2S_CHANS_DAC != 0) || (I2S_CHANS_ADC != 0)
++#if (DSD_CHANS_DAC > 0)
++                if(dsdMode)
++                {
++                    ConfigAudioPortsWrapper(
++#if (I2S_CHANS_DAC != 0) || (DSD_CHANS_DAC != 0)
++                        p_dsd_dac,
++                        DSD_CHANS_DAC,
++#endif
++#if (I2S_CHANS_ADC != 0)
++                        p_i2s_adc,
++                        I2S_WIRES_ADC,
++#endif
++                        null,
++                        p_dsd_clk,
++                        p_mclk_in, clk_audio_bclk, divide, curSamFreq);
++                }
++                else
++#endif
++                {
++                    ConfigAudioPortsWrapper(
++#if (I2S_CHANS_DAC != 0)
++                        p_i2s_dac,
++                        I2S_WIRES_DAC,
++#endif
++#if (I2S_CHANS_ADC != 0)
++                        p_i2s_adc,
++                        I2S_WIRES_ADC,
++#endif
++                        p_lrclk,
++                        p_bclk,
++                        p_mclk_in, clk_audio_bclk, divide, curSamFreq);
++                }
++#endif
++
+ #if (XUA_SYNCMODE == XUA_SYNCMODE_SYNC || XUA_SPDIF_RX_EN || XUA_ADAT_RX_EN)
+                 /* Notify clockgen of new mCLk */
+                 c_audio_rate_change <: mClk;
+diff --git a/lib_xua/src/core/audiohub/xua_audiohub_st.h b/lib_xua/src/core/audiohub/xua_audiohub_st.h
+index 08fdcfe..d8b6043 100644
+--- a/lib_xua/src/core/audiohub/xua_audiohub_st.h
++++ b/lib_xua/src/core/audiohub/xua_audiohub_st.h
+@@ -11,6 +11,30 @@ static inline void StartSampleTransfer(chanend ?c_aud, const unsigned underflowW
+     }
+ }
+ 
++static inline void StopAudioClockOutputs(void)
++{
++#ifndef CODEC_MASTER
++    if(dsdMode == DSD_MODE_OFF)
++    {
++#if (I2S_CHANS_ADC != 0 || I2S_CHANS_DAC != 0)
++        /* Set clocks low */
++        p_lrclk <: 0;
++        p_bclk <: 0;
++#endif
++    }
++    else
++    {
++#if(DSD_CHANS_DAC != 0)
++        /* DSD Clock might not be shared with lrclk or bclk... */
++        p_dsd_clk <: 0;
++#endif
++    }
++#endif
++#if (DSD_CHANS_DAC > 0)
++    if(dsdMode == DSD_MODE_DOP)
++        dsdMode = DSD_MODE_OFF;
++#endif
++}
+ 
+ #pragma unsafe arrays
+ #pragma select handler
+@@ -20,28 +44,43 @@ static inline void CompleteSampleTransferUsbChans(chanend ?c_aud, const int read
+     if(testct(c_aud))
+     {
+         command = inct(c_aud);
+-#ifndef CODEC_MASTER
+-        if(dsdMode == DSD_MODE_OFF)
++        StopAudioClockOutputs();
++        return;
++    }
++    else
++    {
++#if NUM_USB_CHAN_OUT > 0
++#pragma loop unroll
++        for(int i = 0; i < NUM_USB_CHAN_OUT; i++)
+         {
+-#if (I2S_CHANS_ADC != 0 || I2S_CHANS_DAC != 0)
+-            /* Set clocks low */
+-            p_lrclk <: 0;
+-            p_bclk <: 0;
+-#endif
++            int tmp = inuint(c_aud);
++            samplesOut[i] = tmp;
+         }
+-        else
+-        {
+-#if(DSD_CHANS_DAC != 0)
+-            /* DSD Clock might not be shared with lrclk or bclk... */
+-            p_dsd_clk <: 0;
++#else
++        inuint(c_aud);
+ #endif
++        /* Run user code */
++        UserBufferManagement(samplesOut, samplesIn[readBuffNo]);
++
++#if NUM_USB_CHAN_IN > 0
++#pragma loop unroll
++        for(int i = 0; i < NUM_USB_CHAN_IN; i++)
++        {
++            outuint(c_aud, samplesIn[readBuffNo][i]);
+         }
+ #endif
+-#if (DSD_CHANS_DAC > 0)
+-        if(dsdMode == DSD_MODE_DOP)
+-            dsdMode = DSD_MODE_OFF;
+-#endif
+-            return;
++    }
++
++    command = XUA_AUDCTL_NO_COMMAND;
++}
++
++#pragma unsafe arrays
++static inline void CompleteSampleTransferKeepClocks(chanend ?c_aud, const int readBuffNo, unsigned &command)
++{
++    if(testct(c_aud))
++    {
++        command = inct(c_aud);
++        return;
+     }
+     else
+     {
+@@ -55,7 +94,6 @@ static inline void CompleteSampleTransferUsbChans(chanend ?c_aud, const int read
+ #else
+         inuint(c_aud);
+ #endif
+-        /* Run user code */
+         UserBufferManagement(samplesOut, samplesIn[readBuffNo]);
+ 
+ #if NUM_USB_CHAN_IN > 0
+@@ -70,7 +108,6 @@ static inline void CompleteSampleTransferUsbChans(chanend ?c_aud, const int read
+     command = XUA_AUDCTL_NO_COMMAND;
+ }
+ 
+-
+ #pragma select handler
+ static inline void CheckForCmdNoUsbChans(chanend ?c_aud, const int readBuffNo, unsigned &command)
+ {
+@@ -119,3 +156,26 @@ static inline unsigned DoSampleTransfer(chanend ?c_aud, const int readBuffNo, co
+         return XUA_AUDCTL_NO_COMMAND;
+     }
+ }
++
++static inline unsigned DoSampleTransferKeepClocks(chanend ?c_aud, const int readBuffNo, const unsigned underflowWord)
++{
++    if(XUA_USB_EN)
++    {
++        unsigned command;
++        if((NUM_USB_CHAN_OUT > 0) || (NUM_USB_CHAN_IN > 0))
++        {
++            StartSampleTransfer(c_aud, underflowWord);
++            CompleteSampleTransferKeepClocks(c_aud, readBuffNo, command);
++        }
++        else
++        {
++            CheckForCmdNoUsbChans(c_aud, readBuffNo, command);
++        }
++        return command;
++    }
++    else
++    {
++        UserBufferManagement(samplesOut, samplesIn[readBuffNo]);
++        return XUA_AUDCTL_NO_COMMAND;
++    }
++}
+diff --git a/lib_xua/src/core/buffer/decouple/decouple.xc b/lib_xua/src/core/buffer/decouple/decouple.xc
+index c180d57..ea4165c 100644
+--- a/lib_xua/src/core/buffer/decouple/decouple.xc
++++ b/lib_xua/src/core/buffer/decouple/decouple.xc
+@@ -931,6 +931,8 @@ void XUA_Buffer_Decouple(chanend c_mix_out
+                 }
+ #endif
+ 
++                /* A PCM alternate setting must clear a preceding native DSD mode. */
++                dsdMode = DSD_MODE_OFF;
+ #ifdef NATIVE_DSD
+                 if(dataFormatOut == UAC_FORMAT_TYPEI_RAW_DATA)
+                 {
+diff --git a/lib_xua/src/core/endpoint0/xua_ep0_descriptors.h b/lib_xua/src/core/endpoint0/xua_ep0_descriptors.h
+index d0eed83..6aa6bcf 100644
+--- a/lib_xua/src/core/endpoint0/xua_ep0_descriptors.h
++++ b/lib_xua/src/core/endpoint0/xua_ep0_descriptors.h
+@@ -2148,13 +2148,15 @@ USB_Config_Descriptor_Audio2_t cfgDesc_Audio2=
+ #endif /* (AUDIO_CLASS == 2) */
+ 
+ #if XUA_OR_STATIC_HID_ENABLED
+-#if (XUA_AUDIO_CLASS_FS  == 1)
++#if (XUA_AUDIO_CLASS_HS == 2) || (XUA_AUDIO_CLASS_FS == 2)
++unsigned char* hidDescriptor = (unsigned char*) &cfgDesc_Audio2.HID_Descriptor;
++#elif (XUA_AUDIO_CLASS_FS  == 1)
++#define XUA_HID_RAW_ARRAY_DESC 1
+ unsigned char hidDescriptor[] =
+ {
+     #include "xua_hid_descriptor_contents.h"
+ };
+-#elif (XUA_AUDIO_CLASS_HS == 2) || (XUA_AUDIO_CLASS_FS == 2)
+-unsigned char* hidDescriptor = (unsigned char*) &cfgDesc_Audio2.HID_Descriptor;
++#undef XUA_HID_RAW_ARRAY_DESC
+ #else
+     #error "Unknown Audio Class"
+ #endif
+@@ -2937,7 +2939,9 @@ unsigned char cfgDesc_Audio1[] =
+ #endif
+ 
+ #if XUA_OR_STATIC_HID_ENABLED
++#define XUA_HID_RAW_ARRAY_DESC 1
+     #include "xua_hid_descriptors.h"
++#undef XUA_HID_RAW_ARRAY_DESC
+ #endif
+ 
+ };
+diff --git a/lib_xua/src/core/user/audiohw/audiohw.c b/lib_xua/src/core/user/audiohw/audiohw.c
+index dc159cc..20d0fc8 100644
+--- a/lib_xua/src/core/user/audiohw/audiohw.c
++++ b/lib_xua/src/core/user/audiohw/audiohw.c
+@@ -28,6 +28,12 @@ void AudioHwConfig_Mute()
+     return;
+ }
+ 
++void AudioHwConfig_FastMuteNotify() __attribute__ ((weak));
++void AudioHwConfig_FastMuteNotify()
++{
++    return;
++}
++
+ void AudioHwConfig_UnMute() __attribute__ ((weak));
+ void AudioHwConfig_UnMute()
+ {
+diff --git a/lib_xua/src/core/user/audiohw/audiohw.h b/lib_xua/src/core/user/audiohw/audiohw.h
+index 0a58fdc..404bd5b 100644
+--- a/lib_xua/src/core/user/audiohw/audiohw.h
++++ b/lib_xua/src/core/user/audiohw/audiohw.h
+@@ -56,6 +56,12 @@ void AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode, unsigned s
+  */
+ void AudioHwConfig_Mute(void);
+ 
++/**
++ * @brief   Fast non-blocking notification called inside the I2S/DSD loop as soon as a
++ *          sample-rate or stream-mode change is detected, while old clocks keep running.
++ */
++void AudioHwConfig_FastMuteNotify(void);
++
+ /**
+  * @brief   User code to un-mute audio hardware
+  *
+diff --git a/lib_xua/src/hid/xua_hid_descriptor_contents.h b/lib_xua/src/hid/xua_hid_descriptor_contents.h
+index 7d6cece..6224e61 100644
+--- a/lib_xua/src/hid/xua_hid_descriptor_contents.h
++++ b/lib_xua/src/hid/xua_hid_descriptor_contents.h
+@@ -24,7 +24,7 @@
+ 
+ #endif // _HID_DESCRIPTOR_CONTENTS_
+ 
+-#if (AUDIO_CLASS == 1)
++#if (AUDIO_CLASS == 1) || defined(XUA_HID_RAW_ARRAY_DESC)
+ 
+     /* HID descriptor */
+     HID_DESCRIPTOR_LENGTH_0,     /* 0  bLength */
+diff --git a/lib_xua/src/hid/xua_hid_descriptors.h b/lib_xua/src/hid/xua_hid_descriptors.h
+index 891d5e4..6294cd6 100644
+--- a/lib_xua/src/hid/xua_hid_descriptors.h
++++ b/lib_xua/src/hid/xua_hid_descriptors.h
+@@ -10,11 +10,6 @@
+  * definition of the cfgDesc_Audio1 and cfgDesc_Audio2 arrays.
+  */
+ 
+-#ifndef _HID_DESCRIPTORS_
+-#define _HID_DESCRIPTORS_
+-
+ #include "xua_hid_interface_descriptor_contents.h"
+ #include "xua_hid_descriptor_contents.h"
+ #include "xua_hid_endpoint_descriptor_contents.h"
+-
+-#endif // _HID_DESCRIPTORS_
+diff --git a/lib_xua/src/hid/xua_hid_endpoint_descriptor_contents.h b/lib_xua/src/hid/xua_hid_endpoint_descriptor_contents.h
+index 29e96b7..eee71f2 100644
+--- a/lib_xua/src/hid/xua_hid_endpoint_descriptor_contents.h
++++ b/lib_xua/src/hid/xua_hid_endpoint_descriptor_contents.h
+@@ -20,7 +20,7 @@
+ 
+ #endif // _HID_ENDPOINT_DESCRIPTOR_CONTENTS_
+ 
+-#if (AUDIO_CLASS == 1)
++#if (AUDIO_CLASS == 1) || defined(XUA_HID_RAW_ARRAY_DESC)
+ 
+     /* HID Endpoint descriptor (IN) */
+     HID_ENDPOINT_DESCRIPTOR_LENGTH,         /* 0  bLength */
+diff --git a/lib_xua/src/hid/xua_hid_interface_descriptor_contents.h b/lib_xua/src/hid/xua_hid_interface_descriptor_contents.h
+index 01e5ee7..e6b9080 100644
+--- a/lib_xua/src/hid/xua_hid_interface_descriptor_contents.h
++++ b/lib_xua/src/hid/xua_hid_interface_descriptor_contents.h
+@@ -24,7 +24,7 @@
+ 
+ #endif // _HID_INTERFACE_DESCRIPTOR_CONTENTS_
+ 
+-#if (AUDIO_CLASS == 1)
++#if (AUDIO_CLASS == 1) || defined(XUA_HID_RAW_ARRAY_DESC)
+ 
+     /* HID interface descriptor */
+     HID_INTERFACE_DESCRIPTOR_LENGTH,        /* 0  bLength */
